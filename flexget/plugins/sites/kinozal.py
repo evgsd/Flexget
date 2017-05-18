@@ -36,8 +36,6 @@ log = logging.getLogger(__plugin_name__)
 Base = versioned_base(__plugin_name__, 0)
 
 ID_MATCH = re.compile('(?<=id=)\d+')
-QUALITY_MATCH = re.compile('\d+\w|\w+-?\w+')
-NAME_MATCH = re.compile('\(.*\)')
 
 MIRRORS = ['https://kinozal-tv.appspot.com',
            'http://kinozal.tv',
@@ -113,6 +111,10 @@ class KinozalAuth(AuthBase):
             log.debug('Using previously saved cookie')
             self.cookies = cookies
 
+    def __call__(self, r):
+        r.prepare_cookies(self.cookies)
+        return r
+
     def try_authenticate(self, payload):
         for _ in range(5):
             s = RSession()
@@ -144,11 +146,15 @@ class Kinozal(object):
         self.base_url = update_base_url()
 
     def get_item_id(self, link):
-        id = ID_MATCH.findall(link)[0]
+        id = None
+        try:
+            id = ID_MATCH.search(link)[0]
+        except:
+            log.debug('Can\'t parse item id.')
         return id
 
-    def get_item_full_title(self, item):
-        id = self.get_item_id(item.link)
+    def get_item_full_title(self, url):
+        id = self.get_item_id(url)
         if id is not None:
             url = '{}/details.php?id={}'.format(self.base_url, id)
             r = requests.get(url)
@@ -156,23 +162,9 @@ class Kinozal(object):
                 content = r.text
                 soup = get_soup(content)
                 full_title = soup.h1.text
-                if full_title is not None:
-                    item.title = full_title
+                return full_title
 
-    def get_feed(self, url):
-        try:
-            rss = feedparser.parse(url)
-        except:
-            raise PluginError('Can\'t parse rss feed.')
-        if rss.get('status') and rss.get('status') != 200:
-            raise RequestException('Receive not (OK) 200 status')
-        if rss.get('bozo') == 1:
-            log.error('Bozo error found ({}). Trying decode feed manualy.'.format(rss.get('bozo_exception')))
-            decoded_feed = self.decode_feed(url)
-            return self.get_feed(decoded_feed)
-        return rss
-
-    def decode_feed(self, feed_url):
+    def get_feed(self, feed_url):
         r = requests.get(feed_url)
         if not r.ok:
             raise RequestException('Can\'t get feed.')
@@ -180,33 +172,49 @@ class Kinozal(object):
             feed = r.content.decode('utf-8', 'ignore')
         except Exception as e:
             raise PluginError('Can\'t uncode feed. {}'.format(e))
-        return feed
+        try:
+            rss = feedparser.parse(feed)
+        except:
+            raise PluginError('Can\'t parse rss feed.')
+        return rss
+
+    def rewrite_download_url(self, url):
+        if url is None:
+            return None
+        id = self.get_item_id(url)
+        new_url = '{}/dl./download.php?id={}'.format(self.base_url, id)
+        return new_url
 
     def on_task_input(self, task, config):
-        url = '{}/rss.xml'.format(MIRRORS[0])
+        url = '{}/rss.xml'.format(self.base_url)
         feed = self.get_feed(url)
         entries = list()
         for item in feed.entries:
             if item.title.endswith('...'):
-                self.get_item_full_title(item)
-
-            title_arr = list(map(str.strip, item.title.split('/')))
-
-            name_rus = NAME_MATCH.sub('', title_arr[0]).strip()
-            name_eng = NAME_MATCH.sub('', title_arr[1]).strip()
-            quality = QUALITY_MATCH.findall(title_arr[-1])
-            quality_str = '.'.join(quality)
-
-            new_title = '.'.join([name_eng, __plugin_name__, quality_str, 'torrent']).replace(' ', '.')
+                full_title = self.get_item_full_title(item.link)
+                if not full_title:
+                    continue
+                item.title = full_title
 
             entry = Entry()
-            entry['url'] = item.link
-            entry['title'] = new_title
-            entry['series_name_rus'] = name_rus
-            entry['series_name_eng'] = name_eng
+            entry['url'] = self.rewrite_download_url(item.link)
+            entry['title'] = item.title
             entries.append(entry)
 
         return entries
+
+    def on_task_urlrewrite(self, task, config):
+        username = config['username']
+        db_session = Session()
+        cookies = self.try_find_cookie(db_session, username)
+        if username not in self.auth_cache:
+            auth_handler = KinozalAuth(
+                username, config['password'], cookies, db_session)
+            self.auth_cache[username] = auth_handler
+        else:
+            auth_handler = self.auth_cache[username]
+        for entry in task.accepted:
+            entry['download_auth'] = auth_handler
 
     @staticmethod
     def try_find_cookie(db_session, username):
