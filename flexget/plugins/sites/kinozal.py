@@ -36,8 +36,8 @@ log = logging.getLogger(__plugin_name__)
 Base = versioned_base(__plugin_name__, 0)
 
 ID_MATCH = re.compile('(?<=id=)\d+')
-SYMBOLS_MATCH = re.compile('[^A-Za-z0-9]+')
 QUALITY_MATCH = re.compile('\d+\w|\w+-?\w+')
+NAME_MATCH = re.compile('\(.*\)')
 
 MIRRORS = ['https://kinozal-tv.appspot.com',
            'http://kinozal.tv',
@@ -182,9 +182,6 @@ class Kinozal(object):
             raise PluginError('Can\'t uncode feed. {}'.format(e))
         return feed
 
-    def remove_symbols(self, string):
-        return SYMBOLS_MATCH.sub('', string)
-
     def on_task_input(self, task, config):
         url = '{}/rss.xml'.format(MIRRORS[0])
         feed = self.get_feed(url)
@@ -193,18 +190,23 @@ class Kinozal(object):
             if item.title.endswith('...'):
                 self.get_item_full_title(item)
 
-            title = 'В пустыне смерти (2 сезон: 1-9 серии из 10) / Into the Badlands / 2017 / ПМ (Newstudio) / WEB-DL (720p)'
             title_arr = list(map(str.strip, item.title.split('/')))
-            if len(title_arr) < 5:
-                continue
 
-            name_rus = title_arr[0]
-            name_eng = self.remove_symbols(title_arr[1])
+            name_rus = NAME_MATCH.sub('', title_arr[0]).strip()
+            name_eng = NAME_MATCH.sub('', title_arr[1]).strip()
             quality = QUALITY_MATCH.findall(title_arr[-1])
             quality_str = '.'.join(quality)
 
-            torrent_name = '.'.join([name_eng, __plugin_name__, quality_str, 'torrent']).replace(' ', '.')
-            print(name_rus, name_eng, '|', torrent_name)
+            new_title = '.'.join([name_eng, __plugin_name__, quality_str, 'torrent']).replace(' ', '.')
+
+            entry = Entry()
+            entry['url'] = item.link
+            entry['title'] = new_title
+            entry['series_name_rus'] = name_rus
+            entry['series_name_eng'] = name_eng
+            entries.append(entry)
+
+        return entries
 
     @staticmethod
     def try_find_cookie(db_session, username):
